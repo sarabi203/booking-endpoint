@@ -1,0 +1,11 @@
+{
+  "name": "booking-endpoint",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "start": "micro index.js"
+  },
+  "dependencies": {
+    "micro": "^9.3.4"
+  }
+}
