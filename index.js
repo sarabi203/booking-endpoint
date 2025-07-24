@@ -1,125 +1,95 @@
 // index.js
-import { json } from 'micro';
+import { json } from 'micro'
 
-const SHOPIFY_STORE = 'sarabibeach.myshopify.com';      // cambia col tuo dominio shopify
-const ADMIN_API_TOKEN = process.env.SHOPIFY_ADMIN_TOKEN; // definisci questa ENV var in Vercel
+/**
+ * Variabili d’ambiente da impostare in Vercel:
+ *   SHOPIFY_STORE         = "sarabibeach.myshopify.com"
+ *   SHOPIFY_ADMIN_TOKEN   = "<il tuo Admin API token>"
+ */
+const SHOP       = process.env.SHOPIFY_STORE
+const TOKEN      = process.env.SHOPIFY_ADMIN_TOKEN
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
-    res.statusCode = 405;
-    return res.end('Method Not Allowed');
+    res.statusCode = 405
+    return res.end('Method Not Allowed')
   }
 
   try {
-    // 1) Leggi il body JSON inviato dal form
+    // 1) Leggi payload JSON dal form
     const {
-      firstName,
-      lastName,
-      email,
-      phone,
-      birthday,
-      service,
-      dateRequest,
-      timeRequest,
-      participants,
-      notes,
+      firstName, lastName, birthday,
+      email, phone, service,
+      dateRequest, timeRequest,
+      participants, notes,
       consentMarketing
-    } = await json(req);
+    } = await json(req)
 
-    // 2) Prepara la mutation GraphQL
-    const mutation = `
+    // 2) Genera password casuale per il nuovo customer
+    const password = Math.random().toString(36).slice(-8)
+                   + Math.random().toString(36).slice(-8)
+
+    // 3) Prepara array dei metafield
+    const metafields = [
+      { namespace: 'custom', key: 'birthday',     value: birthday,    type: 'single_line_text_field' },
+      { namespace: 'custom', key: 'service',      value: service,     type: 'single_line_text_field' },
+      { namespace: 'custom', key: 'date_request', value: dateRequest, type: 'single_line_text_field' },
+      { namespace: 'custom', key: 'time_request', value: timeRequest, type: 'single_line_text_field' },
+      { namespace: 'custom', key: 'participants', value: participants.toString(), type: 'number_integer' },
+      { namespace: 'custom', key: 'notes',        value: notes || '', type: 'multi_line_text_field' }
+    ]
+
+    // 4) Costruisci mutation GraphQL
+    const query = `
       mutation customerCreate($input: CustomerCreateInput!) {
         customerCreate(input: $input) {
           customer { id }
           userErrors { field message }
         }
       }
-    `;
-
-    // 3) Build dell'input, inclusi metafield e opt-in SMS+EMAIL
-    const input = {
-      firstName,
-      lastName,
-      email,
-      phone,
-      marketingOptInLevel: consentMarketing
-        ? "SMS_AND_EMAIL"
-        : "NONE",
-      metafields: [
-        {
-          namespace: "custom",
-          key: "birthday",
-          type: "date",
-          value: birthday.replace(/\//g, "-") // da GG/MM/AAAA a YYYY-MM-DD
-        },
-        {
-          namespace: "custom",
-          key: "service_requested",
-          type: "single_line_text_field",
-          value: service
-        },
-        {
-          namespace: "custom",
-          key: "date_requested",
-          type: "date",
-          value: dateRequest.replace(/\//g, "-")
-        },
-        {
-          namespace: "custom",
-          key: "time_requested",
-          type: "single_line_text_field",
-          value: timeRequest
-        },
-        {
-          namespace: "custom",
-          key: "participants",
-          type: "number_integer",
-          value: participants.toString()
-        },
-        {
-          namespace: "custom",
-          key: "notes",
-          type: "multi_line_text_field",
-          value: notes || ""
-        }
-      ]
-    };
-
-    // 4) Chiama l'Admin API di Shopify
-    const response = await fetch(
-      `https://${SHOPIFY_STORE}/admin/api/2023-07/graphql.json`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Shopify-Access-Token": ADMIN_API_TOKEN
-        },
-        body: JSON.stringify({ query: mutation, variables: { input } })
+    `
+    const variables = {
+      input: {
+        firstName,
+        lastName,
+        email,
+        phone,
+        password,
+        marketingOptInLevel: consentMarketing
+          ? "SMS_AND_EMAIL"
+          : "EMAIL",
+        metafields
       }
-    );
-    const result = await response.json();
-
-    // 5) Controlla errori
-    if (
-      result.errors ||
-      (result.data.customerCreate.userErrors.length > 0)
-    ) {
-      console.error("Shopify errors:", result);
-      res.statusCode = 500;
-      return res.end(
-        JSON.stringify({ success: false, errors: result })
-      );
     }
 
-    // 6) Tutto OK: rispondi positivamente
-    res.setHeader("Content-Type", "application/json");
-    res.statusCode = 200;
-    return res.end(JSON.stringify({ success: true }));
-  } catch (err) {
-    console.error("Internal error:", err);
-    res.statusCode = 500;
-    return res.end(
-      JSON.stringify({ success: false, error: err.message })
-    );
+    // 5) Chiamata Admin API Shopify
+    const shopUrl = `https://${SHOP}/admin/api/2023-07/graphql.json`
+    const response = await fetch(shopUrl, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Shopify-Access-Token': TOKEN
+      },
+      body: JSON.stringify({ query, variables })
+    })
+    const result = await response.json()
+
+    // 6) Gestisci errori GraphQL
+    const errors = result.data?.customerCreate?.userErrors
+    if (errors && errors.length) {
+      console.error('Shopify errors:', errors)
+      res.statusCode = 400
+      return res.end(JSON.stringify({ success: false, errors }))
+    }
+
+    // 7) Risposta OK
+    res.setHeader('Content-Type', 'application/json')
+    res.statusCode = 200
+    return res.end(JSON.stringify({ success: true }))
+  }
+  catch (err) {
+    console.error('Internal error:', err)
+    res.statusCode = 500
+    return res.end(JSON.stringify({ success: false, message: 'Internal Server Error' }))
   }
 }
