@@ -1,95 +1,110 @@
-// index.js
-import { json } from 'micro'
+import fetch from 'node-fetch';
 
-/**
- * Variabili d’ambiente da impostare in Vercel:
- *   SHOPIFY_STORE         = "sarabibeach.myshopify.com"
- *   SHOPIFY_ADMIN_TOKEN   = "<il tuo Admin API token>"
- */
-const SHOP       = process.env.SHOPIFY_STORE
-const TOKEN      = process.env.SHOPIFY_ADMIN_TOKEN
+const SHOP   = process.env.SHOPIFY_STORE;
+const TOKEN  = process.env.SHOPIFY_ADMIN_TOKEN;
+const VER    = process.env.API_VERSION;
+
+// Query per creare customer + metafield birthday
+const CREATE_CUSTOMER = `
+  mutation($input: CustomerInput!) {
+    customerCreate(input: $input) {
+      customer { id }
+      userErrors { field message }
+    }
+  }
+`;
+// Query per impostare consenso SMS
+const UPDATE_SMS_CONSENT = `
+  mutation($input: CustomerSmsMarketingConsentUpdateInput!) {
+    customerSmsMarketingConsentUpdate(input: $input) {
+      customer {
+        id
+        smsMarketingConsent { marketingState marketingOptInLevel }
+      }
+      userErrors { field message }
+    }
+  }
+`;
 
 export default async function handler(req, res) {
+  // ─── GESTIONE CORS ───────────────────────────────────
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'POST,OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  if (req.method === 'OPTIONS') {
+    return res.status(200).end();
+  }
   if (req.method !== 'POST') {
-    res.statusCode = 405
-    return res.end('Method Not Allowed')
+    return res.status(405).json({ error: 'Method not allowed' });
   }
 
   try {
-    // 1) Leggi payload JSON dal form
-    const {
-      firstName, lastName, birthday,
-      email, phone, service,
-      dateRequest, timeRequest,
-      participants, notes,
-      consentMarketing
-    } = await json(req)
+    const { firstName, lastName, email, phone, birthdate } = req.body;
 
-    // 2) Genera password casuale per il nuovo customer
-    const password = Math.random().toString(36).slice(-8)
-                   + Math.random().toString(36).slice(-8)
-
-    // 3) Prepara array dei metafield
-    const metafields = [
-      { namespace: 'custom', key: 'birthday',     value: birthday,    type: 'single_line_text_field' },
-      { namespace: 'custom', key: 'service',      value: service,     type: 'single_line_text_field' },
-      { namespace: 'custom', key: 'date_request', value: dateRequest, type: 'single_line_text_field' },
-      { namespace: 'custom', key: 'time_request', value: timeRequest, type: 'single_line_text_field' },
-      { namespace: 'custom', key: 'participants', value: participants.toString(), type: 'number_integer' },
-      { namespace: 'custom', key: 'notes',        value: notes || '', type: 'multi_line_text_field' }
-    ]
-
-    // 4) Costruisci mutation GraphQL
-    const query = `
-      mutation customerCreate($input: CustomerCreateInput!) {
-        customerCreate(input: $input) {
-          customer { id }
-          userErrors { field message }
-        }
-      }
-    `
-    const variables = {
-      input: {
-        firstName,
-        lastName,
-        email,
-        phone,
-        password,
-        marketingOptInLevel: consentMarketing
-          ? "SMS_AND_EMAIL"
-          : "EMAIL",
-        metafields
-      }
-    }
-
-    // 5) Chiamata Admin API Shopify
-    const shopUrl = `https://${SHOP}/admin/api/2023-07/graphql.json`
-    const response = await fetch(shopUrl, {
+    // ─── 1) Creo customer + metafield birthday
+    const createResp = await fetch(`https://${SHOP}/admin/api/${VER}/graphql.json`, {
       method: 'POST',
       headers: {
-        'Content-Type': 'application/json',
+        'Content-Type':'application/json',
         'X-Shopify-Access-Token': TOKEN
       },
-      body: JSON.stringify({ query, variables })
-    })
-    const result = await response.json()
+      body: JSON.stringify({
+        query: CREATE_CUSTOMER,
+        variables: {
+          input: {
+            firstName,
+            lastName,
+            email,
+            phone: `+${phone.replace(/\D/g,'')}`,
+            acceptsMarketing: true,
+            metafields: [{
+              namespace: "booking",
+              key:       "birthday",
+              type:      "date",
+              value:     birthdate
+            }]
+          }
+        }
+      })
+    }).then(r => r.json());
 
-    // 6) Gestisci errori GraphQL
-    const errors = result.data?.customerCreate?.userErrors
-    if (errors && errors.length) {
-      console.error('Shopify errors:', errors)
-      res.statusCode = 400
-      return res.end(JSON.stringify({ success: false, errors }))
+    if (createResp.errors || createResp.data.customerCreate.userErrors.length) {
+      console.error(createResp);
+      return res.status(500).json({ error: createResp });
+    }
+    const customerId = createResp.data.customerCreate.customer.id;
+
+    // ─── 2) Imposto il consenso SMS
+    const smsResp = await fetch(`https://${SHOP}/admin/api/${VER}/graphql.json`, {
+      method: 'POST',
+      headers: {
+        'Content-Type':'application/json',
+        'X-Shopify-Access-Token': TOKEN
+      },
+      body: JSON.stringify({
+        query: UPDATE_SMS_CONSENT,
+        variables: {
+          input: {
+            customerId,
+            smsMarketingConsent: {
+              marketingState:      "SUBSCRIBED",
+              marketingOptInLevel: "SINGLE_OPT_IN"
+            }
+          }
+        }
+      })
+    }).then(r => r.json());
+
+    if (smsResp.errors || smsResp.data.customerSmsMarketingConsentUpdate.userErrors.length) {
+      console.error(smsResp);
+      return res.status(500).json({ error: smsResp });
     }
 
-    // 7) Risposta OK
-    res.setHeader('Content-Type', 'application/json')
-    res.statusCode = 200
-    return res.end(JSON.stringify({ success: true }))
-  }
-  catch (err) {
-    console.error('Internal error:', err)
-    res.statusCode = 500
-    return res.end(JSON.stringify({ success: false, message: 'Internal Server Error' }))
+    // ─── 3) Risposta OK
+    return res.status(200).json({ id: customerId });
+
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: err.message });
   }
 }
