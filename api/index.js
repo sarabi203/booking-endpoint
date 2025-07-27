@@ -1,4 +1,3 @@
-import fetch from 'node-fetch';
 
 const SHOP   = process.env.SHOPIFY_STORE;
 const TOKEN  = process.env.SHOPIFY_ADMIN_TOKEN;
